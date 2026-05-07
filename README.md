@@ -1,5 +1,7 @@
 # Hermesian
 
+[中文说明](README.zh-CN.md)
+
 Hermesian is an Obsidian desktop plugin that opens a local chat view for Hermes Agent.
 
 The plugin connects to Hermes through the Agent Client Protocol (ACP) by launching `hermes acp` inside WSL. It does not depend on the Hermes Dashboard web token or the messaging gateway.
