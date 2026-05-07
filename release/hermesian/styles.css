@@ -161,7 +161,7 @@
 }
 
 .hermesian-message-text,
-.hermesian-thinking {
+.hermesian-thinking-body {
 	white-space: pre-wrap;
 	word-break: break-word;
 	font-size: 14px;
@@ -170,11 +170,122 @@
 }
 
 .hermesian-thinking {
-	color: var(--text-muted);
-	border-left: 2px solid var(--background-modifier-border);
-	padding-left: 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
 	margin-bottom: 8px;
-	font-style: italic;
+	background: var(--background-secondary);
+	color: var(--text-muted);
+}
+
+.hermesian-thinking-summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 8px;
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+	user-select: none;
+}
+
+.hermesian-thinking-summary::marker,
+.hermesian-thinking-summary::-webkit-details-marker {
+	color: var(--text-faint);
+}
+
+.hermesian-thinking-label {
+	font-weight: 500;
+	color: var(--text-muted);
+}
+
+.hermesian-thinking-duration {
+	margin-left: auto;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+.hermesian-thinking-body {
+	border-top: 1px solid var(--background-modifier-border);
+	padding: 8px 10px;
+	font-size: 13px;
+}
+
+.hermesian-markdown {
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.hermesian-markdown > :first-child {
+	margin-top: 0;
+}
+
+.hermesian-markdown > :last-child {
+	margin-bottom: 0;
+}
+
+.hermesian-markdown p,
+.hermesian-markdown ul,
+.hermesian-markdown ol,
+.hermesian-markdown blockquote,
+.hermesian-markdown pre {
+	margin-top: 0;
+	margin-bottom: 0.75em;
+}
+
+.hermesian-markdown ul,
+.hermesian-markdown ol {
+	padding-left: 1.35em;
+}
+
+.hermesian-markdown li {
+	margin: 0.2em 0;
+}
+
+.hermesian-markdown blockquote {
+	padding-left: 0.9em;
+	border-left: 3px solid var(--background-modifier-border);
+	color: var(--text-muted);
+}
+
+.hermesian-markdown pre {
+	padding: 10px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+	overflow-x: auto;
+	white-space: pre;
+}
+
+.hermesian-markdown code {
+	border-radius: 4px;
+	background: var(--background-secondary);
+	padding: 0.1em 0.3em;
+}
+
+.hermesian-markdown pre code {
+	padding: 0;
+	background: transparent;
+}
+
+.hermesian-markdown h1,
+.hermesian-markdown h2,
+.hermesian-markdown h3,
+.hermesian-markdown h4 {
+	margin: 0.2em 0 0.45em;
+	line-height: 1.25;
+	letter-spacing: 0;
+}
+
+.hermesian-markdown h1 {
+	font-size: 1.35em;
+}
+
+.hermesian-markdown h2 {
+	font-size: 1.22em;
+}
+
+.hermesian-markdown h3,
+.hermesian-markdown h4 {
+	font-size: 1.08em;
 }
 
 .hermesian-tool-title {

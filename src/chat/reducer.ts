@@ -7,6 +7,7 @@ export interface ChatTranscriptState {
 }
 
 export type IdFactory = (prefix: string) => string;
+export type NowFactory = () => number;
 
 let fallbackId = 0;
 
@@ -63,10 +64,14 @@ export function startAssistantMessage(
 	};
 }
 
-export function markAssistantComplete(state: ChatTranscriptState): ChatTranscriptState {
+export function markAssistantComplete(
+	state: ChatTranscriptState,
+	nowFactory: NowFactory = Date.now
+): ChatTranscriptState {
 	if (!state.activeAssistantId) {
 		return state;
 	}
+	const now = nowFactory();
 	return {
 		...state,
 		activeAssistantId: undefined,
@@ -74,7 +79,7 @@ export function markAssistantComplete(state: ChatTranscriptState): ChatTranscrip
 			if (message.id !== state.activeAssistantId) {
 				return message;
 			}
-			return {...message, status: "complete"};
+			return {...completeThinking(message, now), status: "complete"};
 		}),
 	};
 }
@@ -82,14 +87,15 @@ export function markAssistantComplete(state: ChatTranscriptState): ChatTranscrip
 export function applyAcpSessionUpdate(
 	state: ChatTranscriptState,
 	update: AcpSessionUpdate,
-	idFactory: IdFactory = createChatId
+	idFactory: IdFactory = createChatId,
+	nowFactory: NowFactory = Date.now
 ): ChatTranscriptState {
 	const kind = getUpdateKind(update);
 	if (kind === "agent_message_chunk") {
-		return appendAssistantText(state, extractContentText(update.content), false, idFactory);
+		return appendAssistantText(state, extractContentText(update.content), false, idFactory, nowFactory);
 	}
 	if (kind === "agent_thought_chunk") {
-		return appendAssistantText(state, extractContentText(update.content), true, idFactory);
+		return appendAssistantText(state, extractContentText(update.content), true, idFactory, nowFactory);
 	}
 	if (kind === "user_message_chunk") {
 		return {
@@ -153,10 +159,12 @@ function appendAssistantText(
 	state: ChatTranscriptState,
 	text: string,
 	isThinking: boolean,
-	idFactory: IdFactory
+	idFactory: IdFactory,
+	nowFactory: NowFactory
 ): ChatTranscriptState {
 	let activeId = state.activeAssistantId;
 	let messages = state.messages;
+	const now = nowFactory();
 	if (!activeId || !messages.some((message) => message.id === activeId)) {
 		activeId = idFactory("assistant");
 		messages = [
@@ -179,10 +187,25 @@ function appendAssistantText(
 				return message;
 			}
 			if (isThinking) {
-				return {...message, thinking: (message.thinking ?? "") + text};
+				return {
+					...message,
+					thinking: (message.thinking ?? "") + text,
+					thinkingStartedAt: message.thinkingStartedAt ?? now,
+				};
 			}
-			return {...message, text: message.text + text};
+			return {...completeThinking(message, now), text: message.text + text};
 		}),
+	};
+}
+
+function completeThinking(message: ChatMessage, now: number): ChatMessage {
+	if (message.thinkingStartedAt === undefined || message.thinkingEndedAt !== undefined) {
+		return message;
+	}
+	return {
+		...message,
+		thinkingEndedAt: now,
+		thinkingDurationMs: Math.max(0, now - message.thinkingStartedAt),
 	};
 }
 

@@ -1,4 +1,4 @@
-import {ItemView, MarkdownView, Notice, TFile, WorkspaceLeaf, setIcon} from "obsidian";
+import {ItemView, MarkdownRenderer, MarkdownView, Notice, TFile, WorkspaceLeaf, setIcon} from "obsidian";
 import type HermesianPlugin from "../main";
 import {HermesAcpClient, getOptionId} from "../acp/hermesAcpClient";
 import {VIEW_TYPE_CHAT} from "../constants";
@@ -43,6 +43,8 @@ export class HermesianChatView extends ItemView {
 	private statusEl!: HTMLElement;
 	private usageEl!: HTMLElement;
 	private statusBarOffsetFrame: number | null = null;
+	private renderFrame: number | null = null;
+	private renderGeneration = 0;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: HermesianPlugin) {
 		super(leaf);
@@ -57,7 +59,7 @@ export class HermesianChatView extends ItemView {
 	}
 
 	getIcon(): string {
-		return "bot";
+		return "feather";
 	}
 
 	async onOpen(): Promise<void> {
@@ -68,6 +70,7 @@ export class HermesianChatView extends ItemView {
 		this.disposeClient();
 		this.clearPermissionTimers();
 		this.cancelStatusBarOffsetFrame();
+		this.cancelRenderFrame();
 	}
 
 	disposeClient(): void {
@@ -287,7 +290,7 @@ export class HermesianChatView extends ItemView {
 			},
 			onSessionUpdate: (_sessionId: string, update: AcpSessionUpdate) => {
 				this.state = applyAcpSessionUpdate(this.state, update);
-				this.render();
+				this.scheduleRender();
 			},
 			onPermission: (event) => this.handlePermission(event),
 			onError: (message) => {
@@ -384,6 +387,16 @@ export class HermesianChatView extends ItemView {
 		this.renderMessages();
 		this.renderAttachments();
 		this.renderUsage();
+	}
+
+	private scheduleRender(): void {
+		if (!this.messageListEl || this.renderFrame !== null) {
+			return;
+		}
+		this.renderFrame = window.requestAnimationFrame(() => {
+			this.renderFrame = null;
+			this.render();
+		});
 	}
 
 	private updateMentionMenu(): void {
@@ -537,6 +550,14 @@ export class HermesianChatView extends ItemView {
 		this.statusBarOffsetFrame = null;
 	}
 
+	private cancelRenderFrame(): void {
+		if (this.renderFrame === null) {
+			return;
+		}
+		window.cancelAnimationFrame(this.renderFrame);
+		this.renderFrame = null;
+	}
+
 	private renderUsage(): void {
 		if (!this.usageEl) {
 			return;
@@ -549,17 +570,19 @@ export class HermesianChatView extends ItemView {
 	}
 
 	private renderMessages(): void {
+		this.renderGeneration++;
+		const generation = this.renderGeneration;
 		this.messageListEl.empty();
 		for (const message of this.state.messages) {
-			this.renderMessage(message);
+			this.renderMessage(message, generation);
 		}
 		for (const permission of this.pendingPermissions) {
 			this.renderPermission(permission);
 		}
-		this.messageListEl.scrollTop = this.messageListEl.scrollHeight;
+		this.scrollMessagesToBottom();
 	}
 
-	private renderMessage(message: ChatMessage): void {
+	private renderMessage(message: ChatMessage, generation: number): void {
 		const wrapper = this.messageListEl.createDiv({cls: `hermesian-message hermesian-message-${message.role}`});
 		const meta = wrapper.createDiv({cls: "hermesian-message-meta"});
 		meta.createSpan({text: renderRole(message)});
@@ -570,12 +593,52 @@ export class HermesianChatView extends ItemView {
 			wrapper.createDiv({cls: "hermesian-tool-title", text: message.toolTitle});
 		}
 		if (message.thinking) {
-			wrapper.createDiv({cls: "hermesian-thinking", text: message.thinking});
+			this.renderThinking(wrapper, message, generation);
 		}
 		const text = message.text || (message.role === "assistant" && message.status === "running" ? "Waiting for Hermes..." : "");
 		if (text) {
-			wrapper.createDiv({cls: "hermesian-message-text", text});
+			const textEl = wrapper.createDiv({cls: "hermesian-message-text hermesian-markdown"});
+			this.renderMarkdown(text, textEl, generation);
 		}
+	}
+
+	private renderThinking(parent: HTMLElement, message: ChatMessage, generation: number): void {
+		const details = parent.createEl("details", {cls: "hermesian-thinking"});
+		const summary = details.createEl("summary", {cls: "hermesian-thinking-summary"});
+		summary.createSpan({
+			cls: "hermesian-thinking-label",
+			text: message.thinkingEndedAt ? "思考完成" : "思考中",
+		});
+		summary.createSpan({
+			cls: "hermesian-thinking-duration",
+			text: formatThinkingDuration(message),
+		});
+		const body = details.createDiv({cls: "hermesian-thinking-body hermesian-markdown"});
+		this.renderMarkdown(message.thinking ?? "", body, generation);
+	}
+
+	private renderMarkdown(markdown: string, el: HTMLElement, generation: number): void {
+		void MarkdownRenderer.render(this.app, markdown, el, this.getMarkdownSourcePath(), this).then(
+			() => {
+				if (this.renderGeneration === generation) {
+					this.scrollMessagesToBottom();
+				}
+			},
+			() => {
+				el.setText(markdown);
+				if (this.renderGeneration === generation) {
+					this.scrollMessagesToBottom();
+				}
+			}
+		);
+	}
+
+	private getMarkdownSourcePath(): string {
+		return this.app.workspace.getActiveFile()?.path ?? "";
+	}
+
+	private scrollMessagesToBottom(): void {
+		this.messageListEl.scrollTop = this.messageListEl.scrollHeight;
 	}
 
 	private renderPermission(permission: PermissionRequestEvent): void {
@@ -635,6 +698,23 @@ function renderRole(message: ChatMessage): string {
 		return message.toolKind ? `Tool: ${message.toolKind}` : "Tool";
 	}
 	return message.role;
+}
+
+function formatThinkingDuration(message: ChatMessage): string {
+	const duration = message.thinkingDurationMs ?? (
+		message.thinkingStartedAt !== undefined ? Math.max(0, Date.now() - message.thinkingStartedAt) : 0
+	);
+	const seconds = duration / 1000;
+	if (seconds < 10) {
+		return `${seconds.toFixed(1)}s`;
+	}
+	if (seconds < 60) {
+		return `${Math.round(seconds)}s`;
+	}
+	const minutes = Math.floor(seconds / 60);
+	const remaining = Math.round(seconds % 60);
+	const remainingSeconds = remaining < 10 ? `0${remaining}` : String(remaining);
+	return `${minutes}m ${remainingSeconds}s`;
 }
 
 function permissionTitle(request: AcpPermissionRequest): string {

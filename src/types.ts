@@ -8,6 +8,9 @@ export interface ChatMessage {
 	text: string;
 	createdAt: number;
 	thinking?: string;
+	thinkingStartedAt?: number;
+	thinkingEndedAt?: number;
+	thinkingDurationMs?: number;
 	status?: "running" | "complete" | "completed" | "error" | "pending" | "in_progress" | "failed";
 	toolCallId?: string;
 	toolTitle?: string;

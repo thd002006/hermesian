@@ -7,6 +7,7 @@ import {detectMentionToken, rankMentionCandidates} from "../src/chat/mentions";
 import {
 	applyAcpSessionUpdate,
 	createTranscriptState,
+	markAssistantComplete,
 	type IdFactory,
 } from "../src/chat/reducer";
 import type {PromptAttachment} from "../src/types";
@@ -96,6 +97,7 @@ function testReducer(): void {
 	}, idFactory);
 	assert.equal(state.messages.length, 1);
 	assert.equal(state.messages[0]?.text, "Hello world");
+	assert.equal(state.messages[0]?.thinkingStartedAt, undefined);
 
 	state = applyAcpSessionUpdate(state, {
 		sessionUpdate: "tool_call",
@@ -113,6 +115,36 @@ function testReducer(): void {
 	const tool = state.messages.find((message) => message.toolCallId === "tc-1");
 	assert.equal(tool?.text, "done");
 	assert.equal(tool?.status, "completed");
+
+	let now = 1000;
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_thought_chunk",
+		content: {type: "text", text: "I should inspect context."},
+	}, idFactory, () => now);
+	assert.equal(state.messages[0]?.thinking, "I should inspect context.");
+	assert.equal(state.messages[0]?.thinkingStartedAt, 1000);
+	assert.equal(state.messages[0]?.thinkingEndedAt, undefined);
+	now = 3400;
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_message_chunk",
+		content: {type: "text", text: "Answer"},
+	}, idFactory, () => now);
+	assert.equal(state.messages[0]?.text, "Answer");
+	assert.equal(state.messages[0]?.thinkingEndedAt, 3400);
+	assert.equal(state.messages[0]?.thinkingDurationMs, 2400);
+
+	now = 10000;
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_thought_chunk",
+		content: {type: "text", text: "Still thinking"},
+	}, idFactory, () => now);
+	now = 14550;
+	state = markAssistantComplete(state, () => now);
+	assert.equal(state.messages[0]?.status, "complete");
+	assert.equal(state.messages[0]?.thinkingEndedAt, 14550);
+	assert.equal(state.messages[0]?.thinkingDurationMs, 4550);
 }
 
 function testPermissionResponses(): void {
