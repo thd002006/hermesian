@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import {JsonRpcConnection, type JsonRpcPayload} from "../src/acp/jsonRpc";
-import {buildPermissionResponse} from "../src/acp/hermesAcpClient";
+import {buildPermissionResponse, parseListSessionsResult} from "../src/acp/hermesAcpClient";
 import {buildAcpLaunchArgs, buildWslPathArgs, quoteBash} from "../src/acp/wsl";
 import {buildPromptText} from "../src/chat/prompt";
 import {detectMentionToken, rankMentionCandidates} from "../src/chat/mentions";
 import {
 	applyAcpSessionUpdate,
 	createTranscriptState,
+	markAssistantComplete,
 	type IdFactory,
 } from "../src/chat/reducer";
 import type {PromptAttachment} from "../src/types";
@@ -16,6 +17,7 @@ await testJsonRpcIncomingRequest();
 testWslArgs();
 testPromptAttachments();
 testReducer();
+testSessionParsing();
 testPermissionResponses();
 testMentions();
 
@@ -96,6 +98,7 @@ function testReducer(): void {
 	}, idFactory);
 	assert.equal(state.messages.length, 1);
 	assert.equal(state.messages[0]?.text, "Hello world");
+	assert.equal(state.messages[0]?.thinkingStartedAt, undefined);
 
 	state = applyAcpSessionUpdate(state, {
 		sessionUpdate: "tool_call",
@@ -110,9 +113,128 @@ function testReducer(): void {
 		status: "completed",
 		content: [{type: "content", content: {type: "text", text: "done"}}],
 	}, idFactory);
-	const tool = state.messages.find((message) => message.toolCallId === "tc-1");
-	assert.equal(tool?.text, "done");
-	assert.equal(tool?.status, "completed");
+	assert.equal(state.messages.length, 1);
+	assert.equal(state.messages[0]?.role, "assistant");
+	assert.equal(state.messages[0]?.toolEvents?.length, 1);
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.id, "tc-1");
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.title, "terminal: ls");
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.text, "done");
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.status, "completed");
+
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "user_message_chunk",
+		content: {type: "text", text: "First"},
+	}, idFactory);
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_message_chunk",
+		content: {type: "text", text: "One"},
+	}, idFactory);
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "user_message_chunk",
+		content: {type: "text", text: "Second"},
+	}, idFactory);
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_message_chunk",
+		content: {type: "text", text: "Two"},
+	}, idFactory);
+	assert.deepEqual(state.messages.map((message) => message.text), ["First", "One", "Second", "Two"]);
+	assert.equal(state.messages[1]?.status, "complete");
+
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "tool_call",
+		toolCallId: "tc-alone",
+		title: "fetch docs",
+		kind: "fetch",
+		content: [{type: "content", content: {type: "text", text: "loading"}}],
+	}, idFactory);
+	assert.equal(state.messages.length, 1);
+	assert.equal(state.messages[0]?.role, "assistant");
+	assert.equal(state.messages[0]?.text, "");
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.title, "fetch docs");
+
+	let now = 1000;
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_thought_chunk",
+		content: {type: "text", text: "I should inspect context."},
+	}, idFactory, () => now);
+	assert.equal(state.messages[0]?.thinking, "I should inspect context.");
+	assert.equal(state.messages[0]?.thinkingStartedAt, 1000);
+	assert.equal(state.messages[0]?.thinkingEndedAt, undefined);
+	now = 3400;
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_message_chunk",
+		content: {type: "text", text: "Answer"},
+	}, idFactory, () => now);
+	assert.equal(state.messages[0]?.text, "Answer");
+	assert.equal(state.messages[0]?.thinkingEndedAt, 3400);
+	assert.equal(state.messages[0]?.thinkingDurationMs, 2400);
+
+	now = 5000;
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_thought_chunk",
+		content: {type: "text", text: "Need a file."},
+	}, idFactory, () => now);
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "tool_call",
+		toolCallId: "tc-read",
+		title: "read README",
+		kind: "read",
+		content: [{type: "content", content: {type: "text", text: "README"}}],
+	}, idFactory, () => now);
+	now = 6200;
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_message_chunk",
+		content: {type: "text", text: "Found it."},
+	}, idFactory, () => now);
+	assert.equal(state.messages.length, 1);
+	assert.equal(state.messages[0]?.thinking, "Need a file.");
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.kind, "read");
+	assert.equal(state.messages[0]?.text, "Found it.");
+	assert.equal(state.messages[0]?.thinkingDurationMs, 1200);
+	state = markAssistantComplete(state, () => 6300);
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "tool_call_update",
+		toolCallId: "tc-read",
+		status: "completed",
+		content: [{type: "content", content: {type: "text", text: "README done"}}],
+	}, idFactory, () => 6400);
+	assert.equal(state.activeAssistantId, undefined);
+	assert.equal(state.messages.length, 1);
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.text, "README done");
+	assert.equal(state.messages[0]?.toolEvents?.[0]?.status, "completed");
+
+	now = 10000;
+	state = createTranscriptState();
+	state = applyAcpSessionUpdate(state, {
+		sessionUpdate: "agent_thought_chunk",
+		content: {type: "text", text: "Still thinking"},
+	}, idFactory, () => now);
+	now = 14550;
+	state = markAssistantComplete(state, () => now);
+	assert.equal(state.messages[0]?.status, "complete");
+	assert.equal(state.messages[0]?.thinkingEndedAt, 14550);
+	assert.equal(state.messages[0]?.thinkingDurationMs, 4550);
+}
+
+function testSessionParsing(): void {
+	const result = parseListSessionsResult({
+		sessions: [
+			{sessionId: "camel", cwd: "/vault", title: "Camel", updatedAt: "2026-05-08T00:00:00Z"},
+			{session_id: "snake", cwd: "/vault", title: "Snake", updated_at: "2026-05-08T01:00:00Z"},
+			{cwd: "/missing-id"},
+		],
+		next_cursor: "snake",
+	});
+	assert.equal(result.sessions.length, 2);
+	assert.equal(result.sessions[0]?.sessionId, "camel");
+	assert.equal(result.sessions[0]?.updatedAt, "2026-05-08T00:00:00Z");
+	assert.equal(result.sessions[1]?.sessionId, "snake");
+	assert.equal(result.sessions[1]?.updatedAt, "2026-05-08T01:00:00Z");
+	assert.equal(result.nextCursor, "snake");
 }
 
 function testPermissionResponses(): void {

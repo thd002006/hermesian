@@ -13,7 +13,7 @@ export default class HermesianPlugin extends Plugin {
 		this.registerView(VIEW_TYPE_CHAT, (leaf) => new HermesianChatView(leaf, this));
 
 		// eslint-disable-next-line obsidianmd/ui/sentence-case
-		this.addRibbonIcon("bot", "Open Hermesian", () => {
+		this.addRibbonIcon("feather", "Open Hermesian", () => {
 			void this.activateView();
 		});
 

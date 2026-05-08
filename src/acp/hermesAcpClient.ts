@@ -5,6 +5,8 @@ import {PLUGIN_NAME, PLUGIN_VERSION} from "../constants";
 import type {
 	AcpPermissionOption,
 	AcpPermissionRequest,
+	AcpListSessionsResult,
+	AcpSessionInfo,
 	AcpSessionUpdate,
 	ConnectionStatus,
 	PermissionRequestEvent,
@@ -36,7 +38,7 @@ export class HermesAcpClient {
 	}
 
 	async connect(windowsCwd: string): Promise<void> {
-		if (this.sessionId && this.rpc) {
+		if (this.rpc) {
 			return;
 		}
 		if (this.connecting) {
@@ -68,6 +70,42 @@ export class HermesAcpClient {
 		}
 		this.sessionId = sessionId;
 		return sessionId;
+	}
+
+	async loadSession(sessionId: string): Promise<string> {
+		if (!this.rpc || !this.wslCwd) {
+			throw new Error("Hermes ACP is not connected.");
+		}
+		const targetSessionId = sessionId.trim();
+		if (!targetSessionId) {
+			throw new Error("Session id is empty.");
+		}
+		await this.rpc.request("session/load", {
+			sessionId: targetSessionId,
+			cwd: this.wslCwd,
+			mcpServers: [],
+		}, 30000);
+		this.sessionId = targetSessionId;
+		return targetSessionId;
+	}
+
+	async listSessions(cursor?: string): Promise<AcpListSessionsResult> {
+		if (!this.rpc || !this.wslCwd) {
+			throw new Error("Hermes ACP is not connected.");
+		}
+		const result = await this.rpc.request("session/list", {
+			cwd: this.wslCwd,
+			cursor,
+		}, 30000);
+		return parseListSessionsResult(result);
+	}
+
+	hasSession(): boolean {
+		return Boolean(this.sessionId);
+	}
+
+	getCurrentSessionId(): string | null {
+		return this.sessionId;
 	}
 
 	async prompt(blocks: unknown[]): Promise<unknown> {
@@ -154,7 +192,6 @@ export class HermesAcpClient {
 		});
 
 		await this.initialize();
-		await this.startNewSession();
 		this.emitStatus("connected", "Connected to Hermes ACP");
 	}
 
@@ -299,6 +336,37 @@ function getStringField(value: unknown, camel: string, snake: string): string {
 	const record = value as Record<string, unknown>;
 	const result = record[camel] ?? record[snake];
 	return typeof result === "string" ? result : "";
+}
+
+export function parseListSessionsResult(value: unknown): AcpListSessionsResult {
+	const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+	const rawSessions = Array.isArray(record.sessions) ? record.sessions : [];
+	const sessions: AcpSessionInfo[] = [];
+	for (const rawSession of rawSessions) {
+		if (!rawSession || typeof rawSession !== "object") {
+			continue;
+		}
+		const session = rawSession as Record<string, unknown>;
+		const sessionId = getStringField(session, "sessionId", "session_id");
+		if (!sessionId) {
+			continue;
+		}
+		sessions.push({
+			sessionId,
+			cwd: getOptionalStringField(session, "cwd", "cwd"),
+			title: getOptionalStringField(session, "title", "title"),
+			updatedAt: getOptionalStringField(session, "updatedAt", "updated_at"),
+		});
+	}
+	return {
+		sessions,
+		nextCursor: getOptionalStringField(record, "nextCursor", "next_cursor"),
+	};
+}
+
+function getOptionalStringField(value: Record<string, unknown>, camel: string, snake: string): string | undefined {
+	const result = value[camel] ?? value[snake];
+	return typeof result === "string" && result ? result : undefined;
 }
 
 interface StreamChunk {

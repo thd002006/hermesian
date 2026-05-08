@@ -1,4 +1,4 @@
-import type {AcpSessionUpdate, ChatMessage, UsageInfo} from "../types";
+import type {AcpSessionUpdate, ChatMessage, ToolEvent, UsageInfo} from "../types";
 
 export interface ChatTranscriptState {
 	messages: ChatMessage[];
@@ -7,6 +7,7 @@ export interface ChatTranscriptState {
 }
 
 export type IdFactory = (prefix: string) => string;
+export type NowFactory = () => number;
 
 let fallbackId = 0;
 
@@ -63,10 +64,14 @@ export function startAssistantMessage(
 	};
 }
 
-export function markAssistantComplete(state: ChatTranscriptState): ChatTranscriptState {
+export function markAssistantComplete(
+	state: ChatTranscriptState,
+	nowFactory: NowFactory = Date.now
+): ChatTranscriptState {
 	if (!state.activeAssistantId) {
 		return state;
 	}
+	const now = nowFactory();
 	return {
 		...state,
 		activeAssistantId: undefined,
@@ -74,7 +79,7 @@ export function markAssistantComplete(state: ChatTranscriptState): ChatTranscrip
 			if (message.id !== state.activeAssistantId) {
 				return message;
 			}
-			return {...message, status: "complete"};
+			return {...completeThinking(message, now), status: "complete"};
 		}),
 	};
 }
@@ -82,20 +87,34 @@ export function markAssistantComplete(state: ChatTranscriptState): ChatTranscrip
 export function applyAcpSessionUpdate(
 	state: ChatTranscriptState,
 	update: AcpSessionUpdate,
-	idFactory: IdFactory = createChatId
+	idFactory: IdFactory = createChatId,
+	nowFactory: NowFactory = Date.now
 ): ChatTranscriptState {
 	const kind = getUpdateKind(update);
 	if (kind === "agent_message_chunk") {
-		return appendAssistantText(state, extractContentText(update.content), false, idFactory);
+		return appendAssistantText(state, extractContentText(update.content), false, idFactory, nowFactory);
 	}
 	if (kind === "agent_thought_chunk") {
-		return appendAssistantText(state, extractContentText(update.content), true, idFactory);
+		return appendAssistantText(state, extractContentText(update.content), true, idFactory, nowFactory);
 	}
 	if (kind === "user_message_chunk") {
+		const now = nowFactory();
+		const baseState = state.activeAssistantId
+			? {
+				...state,
+				activeAssistantId: undefined,
+				messages: state.messages.map((message) => {
+					if (message.id !== state.activeAssistantId) {
+						return message;
+					}
+					return {...completeThinking(message, now), status: "complete" as const};
+				}),
+			}
+			: state;
 		return {
-			...state,
+			...baseState,
 			messages: [
-				...state.messages,
+				...baseState.messages,
 				{
 					id: idFactory("user"),
 					role: "user",
@@ -106,7 +125,7 @@ export function applyAcpSessionUpdate(
 		};
 	}
 	if (kind === "tool_call" || kind === "tool_call_update") {
-		return applyToolUpdate(state, update, idFactory);
+		return applyToolUpdate(state, update, idFactory, nowFactory);
 	}
 	if (kind === "usage_update" && typeof update.used === "number" && typeof update.size === "number") {
 		return {
@@ -153,23 +172,13 @@ function appendAssistantText(
 	state: ChatTranscriptState,
 	text: string,
 	isThinking: boolean,
-	idFactory: IdFactory
+	idFactory: IdFactory,
+	nowFactory: NowFactory
 ): ChatTranscriptState {
 	let activeId = state.activeAssistantId;
 	let messages = state.messages;
-	if (!activeId || !messages.some((message) => message.id === activeId)) {
-		activeId = idFactory("assistant");
-		messages = [
-			...messages,
-			{
-				id: activeId,
-				role: "assistant",
-				text: "",
-				createdAt: Date.now(),
-				status: "running",
-			},
-		];
-	}
+	const now = nowFactory();
+	({activeId, messages} = ensureAssistantMessage(activeId, messages, idFactory));
 
 	return {
 		...state,
@@ -179,59 +188,140 @@ function appendAssistantText(
 				return message;
 			}
 			if (isThinking) {
-				return {...message, thinking: (message.thinking ?? "") + text};
+				return {
+					...message,
+					thinking: (message.thinking ?? "") + text,
+					thinkingStartedAt: message.thinkingStartedAt ?? now,
+				};
 			}
-			return {...message, text: message.text + text};
+			return {...completeThinking(message, now), text: message.text + text};
 		}),
+	};
+}
+
+function completeThinking(message: ChatMessage, now: number): ChatMessage {
+	if (message.thinkingStartedAt === undefined || message.thinkingEndedAt !== undefined) {
+		return message;
+	}
+	return {
+		...message,
+		thinkingEndedAt: now,
+		thinkingDurationMs: Math.max(0, now - message.thinkingStartedAt),
 	};
 }
 
 function applyToolUpdate(
 	state: ChatTranscriptState,
 	update: AcpSessionUpdate,
-	idFactory: IdFactory
+	idFactory: IdFactory,
+	nowFactory: NowFactory
 ): ChatTranscriptState {
 	const toolCallId = update.toolCallId ?? update.tool_call_id ?? idFactory("tool-call");
 	const text = extractContentText(update.content) || extractContentText(update.rawOutput ?? update.raw_output);
-	const existingIndex = state.messages.findIndex((message) => message.toolCallId === toolCallId);
 	const status = normalizeToolStatus(update.status, getUpdateKind(update));
-	const title = update.title ?? toolCallId;
+	const title = update.title;
 	const toolKind = update.kind;
-
-	if (existingIndex === -1) {
-		return {
-			...state,
-			messages: [
-				...state.messages,
-				{
-					id: idFactory("tool"),
-					role: "tool",
-					text,
-					createdAt: Date.now(),
-					status,
-					toolCallId,
-					toolTitle: title,
-					toolKind,
-				},
-			],
-		};
+	const now = nowFactory();
+	const existingMessageId = state.messages.find((message) =>
+		message.toolEvents?.some((event) => event.id === toolCallId)
+	)?.id;
+	const shouldPreserveActiveAssistant = Boolean(existingMessageId);
+	let activeId = state.activeAssistantId;
+	let messages = state.messages;
+	if (existingMessageId) {
+		activeId = existingMessageId;
+	} else {
+		({activeId, messages} = ensureAssistantMessage(activeId, messages, idFactory));
 	}
 
 	return {
 		...state,
-		messages: state.messages.map((message, index) => {
-			if (index !== existingIndex) {
+		activeAssistantId: shouldPreserveActiveAssistant ? state.activeAssistantId : activeId,
+		messages: messages.map((message) => {
+			if (message.id !== activeId) {
 				return message;
 			}
 			return {
 				...message,
-				text: text || message.text,
-				status,
-				toolTitle: title,
-				toolKind: toolKind ?? message.toolKind,
+				toolEvents: upsertToolEvent(message.toolEvents ?? [], {
+					id: toolCallId,
+					title,
+					fallbackTitle: toolCallId,
+					kind: toolKind,
+					status,
+					text,
+					createdAt: now,
+					updatedAt: now,
+				}),
 			};
 		}),
 	};
+}
+
+function ensureAssistantMessage(
+	activeId: string | undefined,
+	messages: ChatMessage[],
+	idFactory: IdFactory
+): {activeId: string; messages: ChatMessage[]} {
+	if (activeId && messages.some((message) => message.id === activeId)) {
+		return {activeId, messages};
+	}
+	const nextActiveId = idFactory("assistant");
+	return {
+		activeId: nextActiveId,
+		messages: [
+			...messages,
+			{
+				id: nextActiveId,
+				role: "assistant",
+				text: "",
+				createdAt: Date.now(),
+				status: "running",
+			},
+		],
+	};
+}
+
+function upsertToolEvent(
+	events: ToolEvent[],
+	next: ToolEventDraft
+): ToolEvent[] {
+	const existingIndex = events.findIndex((event) => event.id === next.id);
+	if (existingIndex === -1) {
+		return [...events, {
+			id: next.id,
+			title: next.title ?? next.fallbackTitle,
+			kind: next.kind,
+			status: next.status,
+			text: next.text,
+			createdAt: next.createdAt,
+			updatedAt: next.updatedAt,
+		}];
+	}
+	return events.map((event, index) => {
+		if (index !== existingIndex) {
+			return event;
+		}
+		return {
+			...event,
+			title: next.title ?? event.title,
+			kind: next.kind ?? event.kind,
+			status: next.status,
+			text: next.text || event.text,
+			updatedAt: next.updatedAt,
+		};
+	});
+}
+
+interface ToolEventDraft {
+	id: string;
+	title?: string;
+	fallbackTitle: string;
+	kind?: string;
+	status?: ChatMessage["status"];
+	text: string;
+	createdAt: number;
+	updatedAt: number;
 }
 
 function normalizeToolStatus(

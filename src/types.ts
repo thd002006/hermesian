@@ -8,10 +8,24 @@ export interface ChatMessage {
 	text: string;
 	createdAt: number;
 	thinking?: string;
+	thinkingStartedAt?: number;
+	thinkingEndedAt?: number;
+	thinkingDurationMs?: number;
+	toolEvents?: ToolEvent[];
 	status?: "running" | "complete" | "completed" | "error" | "pending" | "in_progress" | "failed";
 	toolCallId?: string;
 	toolTitle?: string;
 	toolKind?: string;
+}
+
+export interface ToolEvent {
+	id: string;
+	title: string;
+	kind?: string;
+	status?: ChatMessage["status"];
+	text: string;
+	createdAt: number;
+	updatedAt: number;
 }
 
 export interface PromptAttachment {
@@ -44,6 +58,18 @@ export interface AcpSessionUpdate {
 	raw_output?: unknown;
 	size?: number;
 	used?: number;
+}
+
+export interface AcpSessionInfo {
+	sessionId: string;
+	cwd?: string;
+	title?: string;
+	updatedAt?: string;
+}
+
+export interface AcpListSessionsResult {
+	sessions: AcpSessionInfo[];
+	nextCursor?: string;
 }
 
 export interface AcpPermissionOption {

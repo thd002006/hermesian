@@ -1,4 +1,4 @@
-import {ItemView, MarkdownView, Notice, TFile, WorkspaceLeaf, setIcon} from "obsidian";
+import {ItemView, MarkdownRenderer, MarkdownView, Notice, TFile, WorkspaceLeaf, setIcon} from "obsidian";
 import type HermesianPlugin from "../main";
 import {HermesAcpClient, getOptionId} from "../acp/hermesAcpClient";
 import {VIEW_TYPE_CHAT} from "../constants";
@@ -15,11 +15,13 @@ import {
 import type {
 	AcpPermissionOption,
 	AcpPermissionRequest,
+	AcpSessionInfo,
 	AcpSessionUpdate,
 	ChatMessage,
 	ConnectionStatus,
 	PermissionRequestEvent,
 	PromptAttachment,
+	ToolEvent,
 } from "../types";
 
 export class HermesianChatView extends ItemView {
@@ -38,11 +40,18 @@ export class HermesianChatView extends ItemView {
 	private messageListEl!: HTMLElement;
 	private attachmentListEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
+	private sendButtonEl!: HTMLButtonElement;
 	private externalFileInputEl!: HTMLInputElement;
 	private mentionMenuEl!: HTMLElement;
 	private statusEl!: HTMLElement;
 	private usageEl!: HTMLElement;
+	private historyPanelEl!: HTMLElement;
+	private historyListEl!: HTMLElement;
 	private statusBarOffsetFrame: number | null = null;
+	private renderFrame: number | null = null;
+	private renderGeneration = 0;
+	private initialSessionPromise: Promise<void> | null = null;
+	private historyReplayTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: HermesianPlugin) {
 		super(leaf);
@@ -57,17 +66,23 @@ export class HermesianChatView extends ItemView {
 	}
 
 	getIcon(): string {
-		return "bot";
+		return "feather";
 	}
 
 	async onOpen(): Promise<void> {
 		this.renderShell();
+		this.initialSessionPromise = this.restoreInitialSession();
+		void this.initialSessionPromise.finally(() => {
+			this.initialSessionPromise = null;
+		});
 	}
 
 	async onClose(): Promise<void> {
 		this.disposeClient();
 		this.clearPermissionTimers();
 		this.cancelStatusBarOffsetFrame();
+		this.cancelRenderFrame();
+		this.cancelHistoryReplayTimer();
 	}
 
 	disposeClient(): void {
@@ -78,12 +93,18 @@ export class HermesianChatView extends ItemView {
 	}
 
 	async newSession(): Promise<void> {
+		this.cancelHistoryReplayTimer();
 		this.state = createTranscriptState();
 		this.attachments = [];
 		this.pendingPermissions = [];
 		this.clearPermissionTimers();
-		if (this.client) {
-			await this.client.startNewSession();
+		this.closeHistoryPanel();
+		try {
+			const client = await this.ensureClient(false);
+			const sessionId = await client.startNewSession();
+			await this.rememberSession(sessionId);
+		} catch (error) {
+			this.addSystemMessage(error instanceof Error ? error.message : "Could not start a new session.");
 		}
 		this.render();
 	}
@@ -95,7 +116,8 @@ export class HermesianChatView extends ItemView {
 
 	async restartConnection(): Promise<void> {
 		this.disposeClient();
-		await this.ensureClient(true);
+		const client = await this.ensureClient(true);
+		await this.ensureActiveSession(client);
 		this.addSystemMessage("Hermes ACP restarted.");
 	}
 
@@ -168,13 +190,15 @@ export class HermesianChatView extends ItemView {
 		titleWrap.createDiv({cls: "hermesian-title", text: "Hermesian"});
 		this.statusEl = titleWrap.createDiv({cls: "hermesian-status"});
 
-		const actions = header.createDiv({cls: "hermesian-actions"});
-		this.addActionButton(actions, "New", () => void this.newSession());
-		this.addActionButton(actions, "Stop", () => this.cancelCurrentTurn());
-		this.addActionButton(actions, "Restart", () => void this.restartConnection());
-
 		this.messageListEl = this.rootEl.createDiv({cls: "hermesian-messages"});
-		this.usageEl = this.rootEl.createDiv({cls: "hermesian-usage"});
+		const toolbar = this.rootEl.createDiv({cls: "hermesian-output-toolbar"});
+		this.usageEl = toolbar.createDiv({cls: "hermesian-usage"});
+		const actions = toolbar.createDiv({cls: "hermesian-actions"});
+		this.addIconButton(actions, "plus", "New session", () => void this.newSession());
+		this.addIconButton(actions, "rotate-cw", "Restart ACP", () => void this.restartConnection());
+		this.addIconButton(actions, "history", "Chat history", () => void this.toggleHistoryPanel());
+		this.historyPanelEl = toolbar.createDiv({cls: "hermesian-history-panel"});
+		this.historyListEl = this.historyPanelEl.createDiv({cls: "hermesian-history-list"});
 
 		const composer = this.rootEl.createDiv({cls: "hermesian-composer"});
 		this.mentionMenuEl = composer.createDiv({cls: "hermesian-mention-menu"});
@@ -205,7 +229,7 @@ export class HermesianChatView extends ItemView {
 		this.addIconButton(composerActions, "paperclip", "Attach current file", () => void this.attachCurrentFile());
 		this.addIconButton(composerActions, "text-select", "Attach selection", () => this.attachSelection());
 		this.addIconButton(composerActions, "folder-open", "Attach external file", () => this.externalFileInputEl.click());
-		this.addIconButton(composerActions, "send", "Send", () => void this.sendCurrentMessage(), "mod-cta");
+		this.sendButtonEl = this.addIconButton(composerActions, "send", "Send", () => this.handleSendStopClick(), "mod-cta");
 
 		this.externalFileInputEl = composer.createEl("input", {
 			cls: "hermesian-external-input",
@@ -241,7 +265,16 @@ export class HermesianChatView extends ItemView {
 		return button;
 	}
 
+	private handleSendStopClick(): void {
+		if (this.isResponseRunning()) {
+			this.cancelCurrentTurn();
+			return;
+		}
+		void this.sendCurrentMessage();
+	}
+
 	private async sendCurrentMessage(): Promise<void> {
+		this.cancelHistoryReplayTimer();
 		const input = this.inputEl.value.trim();
 		if (!input && this.attachments.length === 0) {
 			return;
@@ -257,11 +290,14 @@ export class HermesianChatView extends ItemView {
 		this.attachments = [];
 		this.closeMentionMenu();
 		this.addUserMessage(userPreview);
-		this.state = startAssistantMessage(this.state);
+		if (!this.isResponseRunning()) {
+			this.state = startAssistantMessage(this.state);
+		}
 		this.render();
 
 		try {
 			const client = await this.ensureClient(false);
+			await this.ensureActiveSession(client);
 			await client.prompt(blocks);
 			this.state = markAssistantComplete(this.state);
 		} catch (error) {
@@ -287,7 +323,7 @@ export class HermesianChatView extends ItemView {
 			},
 			onSessionUpdate: (_sessionId: string, update: AcpSessionUpdate) => {
 				this.state = applyAcpSessionUpdate(this.state, update);
-				this.render();
+				this.scheduleRender();
 			},
 			onPermission: (event) => this.handlePermission(event),
 			onError: (message) => {
@@ -305,6 +341,128 @@ export class HermesianChatView extends ItemView {
 			throw error;
 		}
 		return client;
+	}
+
+	private async restoreInitialSession(): Promise<void> {
+		try {
+			const client = await this.ensureClient(false);
+			const lastSessionId = this.plugin.settings.lastSessionId?.trim();
+			if (lastSessionId) {
+				this.state = createTranscriptState();
+				this.render();
+				await client.loadSession(lastSessionId);
+				await this.rememberSession(lastSessionId);
+				this.scheduleHistoryReplayCompletion();
+				return;
+			}
+			const sessionId = await client.startNewSession();
+			await this.rememberSession(sessionId);
+		} catch (error) {
+			this.state = createTranscriptState();
+			this.render();
+			try {
+				const client = await this.ensureClient(false);
+				const sessionId = await client.startNewSession();
+				await this.rememberSession(sessionId);
+				this.addSystemMessage("Previous Hermes session could not be restored; started a new session.");
+			} catch {
+				this.addSystemMessage(error instanceof Error ? error.message : "Could not restore Hermes session.");
+			}
+		}
+	}
+
+	private async ensureActiveSession(client: HermesAcpClient): Promise<void> {
+		if (this.initialSessionPromise) {
+			await this.initialSessionPromise;
+		}
+		if (client.hasSession()) {
+			return;
+		}
+		const sessionId = await client.startNewSession();
+		await this.rememberSession(sessionId);
+	}
+
+	private async rememberSession(sessionId: string): Promise<void> {
+		this.plugin.settings.lastSessionId = sessionId;
+		await this.plugin.saveSettings();
+	}
+
+	private async toggleHistoryPanel(): Promise<void> {
+		if (this.historyPanelEl.hasClass("is-visible")) {
+			this.closeHistoryPanel();
+			return;
+		}
+		await this.openHistoryPanel();
+	}
+
+	private async openHistoryPanel(): Promise<void> {
+		this.historyPanelEl.addClass("is-visible");
+		this.historyListEl.empty();
+		this.historyListEl.createDiv({cls: "hermesian-history-empty", text: "Loading sessions..."});
+		try {
+			const client = await this.ensureClient(false);
+			const result = await client.listSessions();
+			this.renderHistorySessions(result.sessions, result.nextCursor);
+		} catch (error) {
+			this.historyListEl.empty();
+			this.historyListEl.createDiv({
+				cls: "hermesian-history-empty",
+				text: error instanceof Error ? error.message : "Could not load chat history.",
+			});
+		}
+	}
+
+	private closeHistoryPanel(): void {
+		if (!this.historyPanelEl) {
+			return;
+		}
+		this.historyPanelEl.removeClass("is-visible");
+		this.historyListEl?.empty();
+	}
+
+	private renderHistorySessions(sessions: AcpSessionInfo[], nextCursor?: string): void {
+		this.historyListEl.empty();
+		if (sessions.length === 0) {
+			this.historyListEl.createDiv({cls: "hermesian-history-empty", text: "No sessions for this vault."});
+			return;
+		}
+		for (const session of sessions) {
+			const item = this.historyListEl.createDiv({cls: "hermesian-history-item"});
+			item.setAttr("role", "button");
+			item.setAttr("tabindex", "0");
+			item.createDiv({cls: "hermesian-history-title", text: session.title || "Untitled session"});
+			const meta = item.createDiv({cls: "hermesian-history-meta"});
+			meta.createSpan({text: formatSessionUpdatedAt(session.updatedAt)});
+			if (session.cwd) {
+				meta.createSpan({text: session.cwd});
+			}
+			this.registerDomEvent(item, "click", () => void this.loadHistorySession(session.sessionId));
+			this.registerDomEvent(item, "keydown", (event: KeyboardEvent) => {
+				if (event.key !== "Enter" && event.key !== " ") {
+					return;
+				}
+				event.preventDefault();
+				void this.loadHistorySession(session.sessionId);
+			});
+		}
+		if (nextCursor) {
+			this.historyListEl.createDiv({cls: "hermesian-history-empty", text: "More sessions are available in Hermes."});
+		}
+	}
+
+	private async loadHistorySession(sessionId: string): Promise<void> {
+		this.cancelHistoryReplayTimer();
+		this.closeHistoryPanel();
+		this.state = createTranscriptState();
+		this.render();
+		try {
+			const client = await this.ensureClient(false);
+			await client.loadSession(sessionId);
+			await this.rememberSession(sessionId);
+			this.scheduleHistoryReplayCompletion();
+		} catch (error) {
+			this.addSystemMessage(error instanceof Error ? error.message : "Could not load Hermes session.");
+		}
 	}
 
 	private handlePermission(event: PermissionRequestEvent): void {
@@ -384,6 +542,33 @@ export class HermesianChatView extends ItemView {
 		this.renderMessages();
 		this.renderAttachments();
 		this.renderUsage();
+		this.renderSendStopButton();
+	}
+
+	private isResponseRunning(): boolean {
+		return Boolean(this.state.activeAssistantId);
+	}
+
+	private renderSendStopButton(): void {
+		if (!this.sendButtonEl) {
+			return;
+		}
+		const isRunning = this.isResponseRunning();
+		this.sendButtonEl.toggleClass("mod-stop", isRunning);
+		this.sendButtonEl.setAttr("aria-label", isRunning ? "Stop response" : "Send");
+		this.sendButtonEl.setAttr("title", isRunning ? "Stop response" : "Send");
+		this.sendButtonEl.empty();
+		setIcon(this.sendButtonEl, isRunning ? "square" : "send");
+	}
+
+	private scheduleRender(): void {
+		if (!this.messageListEl || this.renderFrame !== null) {
+			return;
+		}
+		this.renderFrame = window.requestAnimationFrame(() => {
+			this.renderFrame = null;
+			this.render();
+		});
 	}
 
 	private updateMentionMenu(): void {
@@ -537,6 +722,31 @@ export class HermesianChatView extends ItemView {
 		this.statusBarOffsetFrame = null;
 	}
 
+	private cancelRenderFrame(): void {
+		if (this.renderFrame === null) {
+			return;
+		}
+		window.cancelAnimationFrame(this.renderFrame);
+		this.renderFrame = null;
+	}
+
+	private scheduleHistoryReplayCompletion(): void {
+		this.cancelHistoryReplayTimer();
+		this.historyReplayTimer = setTimeout(() => {
+			this.historyReplayTimer = null;
+			this.state = markAssistantComplete(this.state);
+			this.render();
+		}, 500);
+	}
+
+	private cancelHistoryReplayTimer(): void {
+		if (this.historyReplayTimer === null) {
+			return;
+		}
+		clearTimeout(this.historyReplayTimer);
+		this.historyReplayTimer = null;
+	}
+
 	private renderUsage(): void {
 		if (!this.usageEl) {
 			return;
@@ -549,17 +759,19 @@ export class HermesianChatView extends ItemView {
 	}
 
 	private renderMessages(): void {
+		this.renderGeneration++;
+		const generation = this.renderGeneration;
 		this.messageListEl.empty();
 		for (const message of this.state.messages) {
-			this.renderMessage(message);
+			this.renderMessage(message, generation);
 		}
 		for (const permission of this.pendingPermissions) {
 			this.renderPermission(permission);
 		}
-		this.messageListEl.scrollTop = this.messageListEl.scrollHeight;
+		this.scrollMessagesToBottom();
 	}
 
-	private renderMessage(message: ChatMessage): void {
+	private renderMessage(message: ChatMessage, generation: number): void {
 		const wrapper = this.messageListEl.createDiv({cls: `hermesian-message hermesian-message-${message.role}`});
 		const meta = wrapper.createDiv({cls: "hermesian-message-meta"});
 		meta.createSpan({text: renderRole(message)});
@@ -569,13 +781,82 @@ export class HermesianChatView extends ItemView {
 		if (message.toolTitle) {
 			wrapper.createDiv({cls: "hermesian-tool-title", text: message.toolTitle});
 		}
-		if (message.thinking) {
-			wrapper.createDiv({cls: "hermesian-thinking", text: message.thinking});
+		const hasTrace = hasThinkingTrace(message);
+		if (hasTrace) {
+			this.renderThinking(wrapper, message, generation);
 		}
-		const text = message.text || (message.role === "assistant" && message.status === "running" ? "Waiting for Hermes..." : "");
+		const text = message.text || (message.role === "assistant" && message.status === "running" && !hasTrace ? "Waiting for Hermes..." : "");
 		if (text) {
-			wrapper.createDiv({cls: "hermesian-message-text", text});
+			const textEl = wrapper.createDiv({cls: "hermesian-message-text hermesian-markdown"});
+			this.renderMarkdown(text, textEl, generation);
 		}
+	}
+
+	private renderThinking(parent: HTMLElement, message: ChatMessage, generation: number): void {
+		const details = parent.createEl("details", {cls: "hermesian-thinking"});
+		details.setAttr("open", "true");
+		const summary = details.createEl("summary", {cls: "hermesian-thinking-summary"});
+		summary.createSpan({
+			cls: "hermesian-thinking-label",
+			text: getThinkingLabel(message),
+		});
+		summary.createSpan({
+			cls: "hermesian-thinking-duration",
+			text: formatThinkingSummaryMeta(message),
+		});
+		const body = details.createDiv({cls: "hermesian-thinking-body"});
+		if (message.thinking) {
+			const thoughtEl = body.createDiv({cls: "hermesian-thinking-text hermesian-markdown"});
+			this.renderMarkdown(message.thinking, thoughtEl, generation);
+		}
+		if (message.toolEvents?.length) {
+			this.renderToolEvents(body, message.toolEvents, generation);
+		}
+	}
+
+	private renderToolEvents(parent: HTMLElement, toolEvents: ToolEvent[], generation: number): void {
+		const list = parent.createDiv({cls: "hermesian-tool-events"});
+		for (const toolEvent of toolEvents) {
+			const details = list.createEl("details", {cls: "hermesian-tool-event"});
+			const summary = details.createEl("summary", {cls: "hermesian-tool-event-summary"});
+			summary.createSpan({
+				cls: "hermesian-tool-event-title",
+				text: formatToolEventTitle(toolEvent),
+			});
+			if (toolEvent.status) {
+				summary.createSpan({
+					cls: `hermesian-tool-event-status ${toolEvent.status === "failed" ? "is-failed" : ""}`,
+					text: toolEvent.status,
+				});
+			}
+			const text = toolEvent.text || "No output.";
+			const output = details.createDiv({cls: "hermesian-tool-event-output hermesian-markdown"});
+			this.renderMarkdown(text, output, generation);
+		}
+	}
+
+	private renderMarkdown(markdown: string, el: HTMLElement, generation: number): void {
+		void MarkdownRenderer.render(this.app, markdown, el, this.getMarkdownSourcePath(), this).then(
+			() => {
+				if (this.renderGeneration === generation) {
+					this.scrollMessagesToBottom();
+				}
+			},
+			() => {
+				el.setText(markdown);
+				if (this.renderGeneration === generation) {
+					this.scrollMessagesToBottom();
+				}
+			}
+		);
+	}
+
+	private getMarkdownSourcePath(): string {
+		return this.app.workspace.getActiveFile()?.path ?? "";
+	}
+
+	private scrollMessagesToBottom(): void {
+		this.messageListEl.scrollTop = this.messageListEl.scrollHeight;
 	}
 
 	private renderPermission(permission: PermissionRequestEvent): void {
@@ -635,6 +916,72 @@ function renderRole(message: ChatMessage): string {
 		return message.toolKind ? `Tool: ${message.toolKind}` : "Tool";
 	}
 	return message.role;
+}
+
+function formatThinkingDuration(message: ChatMessage): string {
+	const duration = message.thinkingDurationMs ?? (
+		message.thinkingStartedAt !== undefined ? Math.max(0, Date.now() - message.thinkingStartedAt) : 0
+	);
+	const seconds = duration / 1000;
+	if (seconds < 10) {
+		return `${seconds.toFixed(1)}s`;
+	}
+	if (seconds < 60) {
+		return `${Math.round(seconds)}s`;
+	}
+	const minutes = Math.floor(seconds / 60);
+	const remaining = Math.round(seconds % 60);
+	const remainingSeconds = remaining < 10 ? `0${remaining}` : String(remaining);
+	return `${minutes}m ${remainingSeconds}s`;
+}
+
+function hasThinkingTrace(message: ChatMessage): boolean {
+	return Boolean(message.thinking || message.toolEvents?.length);
+}
+
+function getThinkingLabel(message: ChatMessage): string {
+	if (!message.thinking) {
+		return "工具调用";
+	}
+	return message.thinkingEndedAt ? "思考完成" : "思考中";
+}
+
+function formatThinkingSummaryMeta(message: ChatMessage): string {
+	const parts: string[] = [];
+	if (message.thinkingStartedAt !== undefined || message.thinkingDurationMs !== undefined) {
+		parts.push(formatThinkingDuration(message));
+	}
+	const toolCount = message.toolEvents?.length ?? 0;
+	if (toolCount > 0) {
+		parts.push(`${toolCount} ${toolCount === 1 ? "tool" : "tools"}`);
+	}
+	return parts.join(" · ");
+}
+
+function formatToolEventTitle(toolEvent: ToolEvent): string {
+	const title = toolEvent.title || toolEvent.id;
+	return toolEvent.kind ? `Tool: ${toolEvent.kind} · ${title}` : `Tool: ${title}`;
+}
+
+function formatSessionUpdatedAt(value: string | undefined): string {
+	if (!value) {
+		return "Unknown time";
+	}
+	const timestamp = Date.parse(value);
+	if (!Number.isFinite(timestamp)) {
+		return value;
+	}
+	const elapsedMs = Date.now() - timestamp;
+	if (elapsedMs < 60 * 1000) {
+		return "Just now";
+	}
+	if (elapsedMs < 60 * 60 * 1000) {
+		return `${Math.max(1, Math.round(elapsedMs / (60 * 1000)))}m ago`;
+	}
+	if (elapsedMs < 24 * 60 * 60 * 1000) {
+		return `${Math.round(elapsedMs / (60 * 60 * 1000))}h ago`;
+	}
+	return new Date(timestamp).toLocaleDateString();
 }
 
 function permissionTitle(request: AcpPermissionRequest): string {
