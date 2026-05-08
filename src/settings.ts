@@ -8,6 +8,7 @@ export interface HermesianSettings {
 	autoStartAcp: boolean;
 	approvalTimeoutSeconds: number;
 	dashboardBatPath: string;
+	lastSessionId?: string;
 }
 
 export const DEFAULT_SETTINGS: HermesianSettings = {
@@ -16,6 +17,7 @@ export const DEFAULT_SETTINGS: HermesianSettings = {
 	autoStartAcp: true,
 	approvalTimeoutSeconds: 60,
 	dashboardBatPath: DEFAULT_DASHBOARD_BAT_PATH,
+	lastSessionId: undefined,
 };
 
 export class HermesianSettingTab extends PluginSettingTab {

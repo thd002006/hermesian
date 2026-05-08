@@ -24,7 +24,7 @@
 .hermesian-header {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
+	justify-content: flex-start;
 	gap: 12px;
 	padding: 10px 0 8px;
 	border-bottom: 1px solid var(--background-modifier-border);
@@ -60,6 +60,18 @@
 	gap: 6px;
 	flex-wrap: wrap;
 	justify-content: flex-end;
+}
+
+.hermesian-output-toolbar {
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	min-height: 34px;
+	padding: 4px 0 6px;
+	border-top: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
 }
 
 .hermesian-button {
@@ -209,6 +221,65 @@
 	font-size: 13px;
 }
 
+.hermesian-thinking-text {
+	margin-bottom: 8px;
+}
+
+.hermesian-tool-events {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.hermesian-tool-event {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+}
+
+.hermesian-tool-event-summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 8px;
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+	user-select: none;
+}
+
+.hermesian-tool-event-summary::marker,
+.hermesian-tool-event-summary::-webkit-details-marker {
+	color: var(--text-faint);
+}
+
+.hermesian-tool-event-title {
+	min-width: 0;
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-muted);
+}
+
+.hermesian-tool-event-status {
+	flex-shrink: 0;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+	text-transform: capitalize;
+}
+
+.hermesian-tool-event-status.is-failed {
+	color: var(--text-error);
+}
+
+.hermesian-tool-event-output {
+	max-height: 280px;
+	overflow: auto;
+	border-top: 1px solid var(--background-modifier-border);
+	padding: 8px;
+	font-size: 12px;
+}
+
 .hermesian-markdown {
 	white-space: normal;
 	overflow-wrap: anywhere;
@@ -296,10 +367,96 @@
 }
 
 .hermesian-usage {
+	min-width: 0;
 	min-height: 18px;
-	padding: 0 0 4px;
+	padding: 0;
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.hermesian-history-panel {
+	display: none;
+	position: absolute;
+	right: 0;
+	bottom: calc(100% + 6px);
+	width: min(360px, 100%);
+	max-height: min(420px, 70vh);
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+	box-shadow: var(--hermesian-panel-shadow);
+	z-index: 1000;
+}
+
+.hermesian-history-panel.is-visible {
+	display: block;
+}
+
+.hermesian-history-list {
+	display: flex;
+	flex-direction: column;
+	padding: 4px;
+}
+
+.hermesian-history-item {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 10px;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--text-normal);
+	text-align: left;
+	cursor: pointer;
+	line-height: 1.3;
+}
+
+.hermesian-history-item:hover,
+.hermesian-history-item:focus {
+	background: var(--background-modifier-hover);
+	outline: none;
+}
+
+.hermesian-history-title {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	font-weight: 500;
+	line-height: 1.35;
+}
+
+.hermesian-history-meta {
+	display: flex;
+	gap: 8px;
+	min-width: 0;
+	overflow: hidden;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.3;
+}
+
+.hermesian-history-meta span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-muted);
+}
+
+.hermesian-history-empty {
+	padding: 12px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	text-align: center;
 }
 
 .hermesian-composer {
@@ -401,7 +558,25 @@
 
 .hermesian-icon-button.mod-cta {
 	margin-left: auto;
-	color: var(--hermesian-brand);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.hermesian-icon-button.mod-cta:hover,
+.hermesian-icon-button.mod-cta:focus {
+	background: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+.hermesian-icon-button.mod-cta.mod-stop {
+	background: var(--background-modifier-error, var(--background-modifier-hover));
+	color: var(--text-error);
+}
+
+.hermesian-icon-button.mod-cta.mod-stop:hover,
+.hermesian-icon-button.mod-cta.mod-stop:focus {
+	background: var(--background-modifier-error-hover, var(--background-modifier-error, var(--background-modifier-hover)));
+	color: var(--text-error);
 }
 
 .hermesian-attachment {
